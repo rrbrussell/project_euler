@@ -7,12 +7,12 @@ fn main() {
     print!("do not exceed four million, find the sum of the even-valued");
     println!(" terms.\n");
 
-    let mut sum: i128 = 0;
+    let mut sum: i128 = 2;
     let mut second_previous: i64 = 1;
     let mut previous: i64 = 2;
     let mut temporary: i64 = fibonacci(second_previous, previous);
 
-    while temporary <= 4000000 {
+    while temporary < 4000000 {
         if temporary % 2 == 0 {
             sum = sum + (temporary as i128);
         }

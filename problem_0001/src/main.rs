@@ -5,7 +5,7 @@ fn main() {
     println!("Find the sum of all the multiples of 3 or 5 below 1000.");
 
     let mut sum: i64 = 0;
-    for item in 1..=1000 {
+    for item in 1..1000 {
         if item % 3 == 0 {
             sum = sum + item;
         }
