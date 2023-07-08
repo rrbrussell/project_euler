@@ -5,6 +5,7 @@ use std::io::BufWriter;
 use std::io::Write;
 use std::num::NonZeroUsize;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::mpsc::channel;
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::Sender;
@@ -25,9 +26,9 @@ fn main() -> Result<(), std::io::Error> {
     } else {
         let mut known_primes: Vec<u128> = Vec::with_capacity(8192);
         let previous_primes_list = [
-            "primes_u64.txt",
+            /*"primes_u64.txt",
             "primes_u32.txt",
-            "primes_u16.txt",
+            "primes_u16.txt",*/
             "primes_u8.txt",
         ];
         for list_entry in previous_primes_list {
@@ -77,21 +78,67 @@ fn main() -> Result<(), std::io::Error> {
             }
         }
 
+        // known_primes has at least two items in it.
         let mut x: u128 = *known_primes.last().unwrap();
-        while x <= (u32::MAX - 3) as u128 {
-            if is_prime(x as u128, &known_primes) {
-                //println!("{} is prime.", x);
-                known_primes.push(x as u128);
+        let mut keep_looping: bool = true;
+        // prime the threads
+        for ind in &to_threads {
+            x += 2_u128;
+            match ind.send(Message::TestThis(x)) {
+                Ok(_) => {}
+                Err(err) => {
+                    return Err(std::io::Error::new(std::io::ErrorKind::Other, err));
+                }
             }
-            x += 2;
         }
-        if is_prime(x as u128, &known_primes) {
-            //println!("{} is prime.", x);
-            known_primes.push(x as u128);
+        while keep_looping {
+            let received = from_threads.recv();
+            match received {
+                Err(_) => {
+                    keep_looping = false;
+                }
+                Ok(message) => match message {
+                    Message::FoundPrime((prime, thread_name)) => {
+                        known_primes.push(prime);
+                        for index in &to_threads {
+                            // If a thread has died unexpectedly then fail.
+                            index
+                                .send(Message::FoundPrime((prime, thread_name.to_owned())))
+                                .unwrap();
+                        } /*
+                          match x.checked_add(2_u128) {
+                              Some(new_x) => {
+                                  to_threads[usize::from_str(&thread_name).unwrap()]
+                                      .send(Message::TestThis(new_x))
+                                      .unwrap();
+                                  x = new_x;
+                              }
+                              None => {
+                                  for index in &to_threads {
+                                      index.send(Message::Shutdown).unwrap();
+                                  }
+                              }
+                          }*/
+                        x += 2;
+                        if x < u16::MAX as u128 {
+                            to_threads[usize::from_str(&thread_name).unwrap()]
+                                .send(Message::TestThis(x))
+                                .unwrap();
+                        } else {
+                            for index in &to_threads {
+                                index.send(Message::Shutdown).unwrap();
+                            }
+                        }
+                    }
+                    Message::TestThis(_) => {
+                        eprintln!("Nothing should be sending main primes to test.")
+                    }
+                    Message::Shutdown => {
+                        eprintln!("Main tells everything else to shutdown.")
+                    }
+                },
+            }
         }
-        // using threads.
-        let (tx, rx) = channel::<Message>();
-
         let mut writer = BufWriter::new(File::create("primes_u32.txt").unwrap());
         known_primes.sort();
         for x in known_primes {
@@ -111,8 +158,7 @@ fn is_prime(x: u128, known_primes: &Vec<u128>) -> bool {
 }
 
 enum Message {
-    IncomingPrime(u128),
-    OutgoingPrime((u128, String)),
+    FoundPrime((u128, String)),
     TestThis(u128),
     Shutdown,
 }
@@ -129,14 +175,15 @@ fn other_thread(
             Message::Shutdown => {
                 break;
             }
-            Message::OutgoingPrime(_) => {}
-            Message::IncomingPrime(x) => {
-                known_primes.push(x);
+            Message::FoundPrime((x, thread_name)) => {
+                if my_name != thread_name {
+                    known_primes.push(x);
+                }
             }
             Message::TestThis(x) => {
                 if is_prime(x, known_primes) {
                     to_main
-                        .send(Message::OutgoingPrime((x, my_name.to_owned())))
+                        .send(Message::FoundPrime((x, my_name.to_owned())))
                         .expect("Main thread should not die first.");
                     known_primes.push(x);
                 }
