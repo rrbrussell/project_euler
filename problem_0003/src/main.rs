@@ -5,10 +5,10 @@ use std::io::BufWriter;
 use std::io::Write;
 use std::num::NonZeroUsize;
 use std::path::Path;
-use std::str::FromStr;
-use std::sync::mpsc::channel;
+use std::sync::mpsc::sync_channel;
 use std::sync::mpsc::Receiver;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::TrySendError;
 use std::thread;
 use std::thread::Builder;
 use std::thread::JoinHandle;
@@ -60,10 +60,10 @@ fn main() -> Result<(), std::io::Error> {
         }
 
         let mut threads = Vec::<JoinHandle<()>>::with_capacity(number_of_threads);
-        let mut to_threads = Vec::<Sender<Message>>::with_capacity(number_of_threads);
-        let (to_main, from_threads) = channel::<Message>();
+        let mut to_threads = Vec::<SyncSender<Message>>::with_capacity(number_of_threads);
+        let (to_main, from_threads) = sync_channel::<Message>(10);
         for ind in 0..number_of_threads {
-            let (to_thread, from_main) = channel::<Message>();
+            let (to_thread, from_main) = sync_channel::<Message>(10);
             to_threads.push(to_thread);
             let mut known_primes = known_primes.clone();
             let to_main = to_main.clone();
@@ -81,17 +81,58 @@ fn main() -> Result<(), std::io::Error> {
         // known_primes has at least two items in it.
         let mut x: u128 = *known_primes.last().unwrap();
         let mut keep_looping: bool = true;
-        // prime the threads
-        for ind in &to_threads {
-            x += 2_u128;
-            match ind.send(Message::TestThis(x)) {
-                Ok(_) => {}
-                Err(err) => {
-                    return Err(std::io::Error::new(std::io::ErrorKind::Other, err));
+        let mut overflow: bool = false;
+        while keep_looping {
+            if !overflow {
+                for index in 0..to_threads.len() {
+                    eprintln!("Sending {x} to thread {index}");
+                    let mut keep_sending = true;
+                    while keep_sending {
+                        x += 2;
+                        if x < u16::MAX as u128 {
+                            match to_threads[index].try_send(Message::TestThis(x)) {
+                                Ok(()) => {}
+                                Err(err) => match err {
+                                    TrySendError::Full::<Message>(_) => {
+                                        x -= 2;
+                                        keep_sending = false;
+                                    }
+                                    TrySendError::Disconnected::<Message>(_) => {
+                                        x -= 2;
+                                        keep_sending = false;
+                                    }
+                                },
+                            }
+                        } else {
+                            keep_sending = false;
+                            overflow = true;
+                        }
+                    }
+                }
+            } else if to_threads.len() > 0 {
+                let mut index: usize = to_threads.len();
+                while index > 0 {
+                    match to_threads[index - 1].try_send(Message::Shutdown) {
+                        Ok(()) => {
+                            let _ = to_threads.remove(index);
+                            index -= 1;
+                        }
+                        Err(err) => match err {
+                            // Leave this thread alone. We will try again to close
+                            // it later.
+                            TrySendError::Full::<Message>(_) => {
+                                index -= 1;
+                            }
+                            TrySendError::Disconnected::<Message>(_) => {
+                                // This thread is already shutdown remove it.
+                                let _ = to_threads.remove(index);
+                                index -= 1;
+                            }
+                        },
+                    }
                 }
             }
-        }
-        while keep_looping {
+
             let received = from_threads.recv();
             match received {
                 Err(_) => {
@@ -100,34 +141,12 @@ fn main() -> Result<(), std::io::Error> {
                 Ok(message) => match message {
                     Message::FoundPrime((prime, thread_name)) => {
                         known_primes.push(prime);
-                        for index in &to_threads {
+                        for thread in &to_threads {
+                            eprintln!("Found prime: {prime} from {thread_name}");
                             // If a thread has died unexpectedly then fail.
-                            index
+                            thread
                                 .send(Message::FoundPrime((prime, thread_name.to_owned())))
                                 .unwrap();
-                        } /*
-                          match x.checked_add(2_u128) {
-                              Some(new_x) => {
-                                  to_threads[usize::from_str(&thread_name).unwrap()]
-                                      .send(Message::TestThis(new_x))
-                                      .unwrap();
-                                  x = new_x;
-                              }
-                              None => {
-                                  for index in &to_threads {
-                                      index.send(Message::Shutdown).unwrap();
-                                  }
-                              }
-                          }*/
-                        x += 2;
-                        if x < u16::MAX as u128 {
-                            to_threads[usize::from_str(&thread_name).unwrap()]
-                                .send(Message::TestThis(x))
-                                .unwrap();
-                        } else {
-                            for index in &to_threads {
-                                index.send(Message::Shutdown).unwrap();
-                            }
                         }
                     }
                     Message::TestThis(_) => {
@@ -167,7 +186,7 @@ enum Message {
 fn other_thread(
     known_primes: &mut Vec<u128>,
     from_main: Receiver<Message>,
-    to_main: Sender<Message>,
+    to_main: SyncSender<Message>,
 ) {
     let my_name: String = thread::current().name().unwrap().to_string();
     while let Ok(input) = from_main.recv() {
@@ -193,3 +212,18 @@ fn other_thread(
     drop(from_main);
     drop(to_main);
 }
+
+/*
+match x.checked_add(2_u128) {
+    Some(new_x) => {
+        to_threads[usize::from_str(&thread_name).unwrap()]
+            .send(Message::TestThis(new_x))
+            .unwrap();
+        x = new_x;
+    }
+    None => {
+        for index in &to_threads {
+            index.send(Message::Shutdown).unwrap();
+        }
+    }
+}*/
