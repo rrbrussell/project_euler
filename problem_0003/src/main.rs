@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufRead;
 use std::io::BufReader;
@@ -5,13 +6,13 @@ use std::io::BufWriter;
 use std::io::Write;
 use std::num::NonZeroUsize;
 use std::path::Path;
-use std::sync::mpsc::sync_channel;
+use std::sync::mpsc::channel;
 use std::sync::mpsc::Receiver;
-use std::sync::mpsc::SyncSender;
-use std::sync::mpsc::TrySendError;
+use std::sync::mpsc::Sender;
 use std::thread;
 use std::thread::Builder;
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 fn main() -> Result<(), std::io::Error> {
     println!("Finding all primes that fit inside a u32.");
@@ -26,9 +27,9 @@ fn main() -> Result<(), std::io::Error> {
     } else {
         let mut known_primes: Vec<u128> = Vec::with_capacity(8192);
         let previous_primes_list = [
-            /*"primes_u64.txt",
+            "primes_u64.txt",
             "primes_u32.txt",
-            "primes_u16.txt",*/
+            "primes_u16.txt",
             "primes_u8.txt",
         ];
         for list_entry in previous_primes_list {
@@ -59,107 +60,130 @@ fn main() -> Result<(), std::io::Error> {
             known_primes.push(3);
         }
 
-        let mut threads = Vec::<JoinHandle<()>>::with_capacity(number_of_threads);
-        let mut to_threads = Vec::<SyncSender<Message>>::with_capacity(number_of_threads);
-        let (to_main, from_threads) = sync_channel::<Message>(10);
+        let mut threads = HashMap::<String, JoinHandle<()>>::with_capacity(number_of_threads);
+        let mut to_threads = HashMap::<String, Sender<Message>>::with_capacity(number_of_threads);
+        let mut threads_to_clean = Vec::<String>::with_capacity(number_of_threads);
+        let (to_main, from_threads) = channel::<Message>();
         for ind in 0..number_of_threads {
-            let (to_thread, from_main) = sync_channel::<Message>(10);
-            to_threads.push(to_thread);
+            let (to_thread, from_main) = channel::<Message>();
+            to_threads.insert(format!("Worker {ind}"), to_thread);
             let mut known_primes = known_primes.clone();
             let to_main = to_main.clone();
             let thread = Builder::new()
-                .name(ind.to_string())
+                .name(format!("Worker {ind}"))
                 .spawn(move || other_thread(&mut known_primes, from_main, to_main));
             if thread.is_err() {
-                eprintln!("Cannot spawn a client thread.");
                 return Err(thread.err().unwrap());
             } else {
-                threads.push(thread.unwrap());
+                threads.insert(format!("Worker {ind}"), thread.unwrap());
             }
         }
 
         // known_primes has at least two items in it.
         let mut x: u128 = *known_primes.last().unwrap();
-        let mut keep_looping: bool = true;
-        let mut overflow: bool = false;
-        while keep_looping {
-            if !overflow {
-                for index in 0..to_threads.len() {
-                    eprintln!("Sending {x} to thread {index}");
-                    let mut keep_sending = true;
-                    while keep_sending {
-                        x += 2;
-                        if x < u16::MAX as u128 {
-                            match to_threads[index].try_send(Message::TestThis(x)) {
-                                Ok(()) => {}
-                                Err(err) => match err {
-                                    TrySendError::Full::<Message>(_) => {
-                                        x -= 2;
-                                        keep_sending = false;
-                                    }
-                                    TrySendError::Disconnected::<Message>(_) => {
-                                        x -= 2;
-                                        keep_sending = false;
-                                    }
-                                },
-                            }
-                        } else {
-                            keep_sending = false;
-                            overflow = true;
-                        }
+
+        let mut sent = 0;
+        let mut recv = 0;
+
+        //prime the worker threads
+        for (key, value) in to_threads.iter() {
+            x += 2;
+            if x < u32::MAX as u128 {
+                eprintln!("Sending {x} to thread {key}");
+                if value.send(Message::TestThis(x)).is_err() {
+                    threads_to_clean.push(key.to_owned());
+                } else {
+                    sent += 1;
+                }
+            }
+        }
+        for item in &threads_to_clean {
+            to_threads.remove(item);
+        }
+        threads_to_clean.clear();
+        let mut exhausted_search_space: bool = false;
+        while let Ok(received) = from_threads.recv() {
+            recv += 1;
+            eprintln!("Main has sent {sent} and received {recv}");
+            let mut refill_thread_name: String = "".to_string();
+            match received {
+                Message::IsPrime((prime, thread_name)) => {
+                    eprintln!("{thread_name} confirmed {prime} is prime.");
+                    known_primes.push(prime);
+                    refill_thread_name = thread_name.to_owned();
+                    for (_, sender) in to_threads.iter() {
+                        // If a thread has died unexpectedly then fail.
+                        sender
+                            .send(Message::IsPrime((prime, thread_name.to_owned())))
+                            .unwrap();
                     }
                 }
-            } else if to_threads.len() > 0 {
-                let mut index: usize = to_threads.len();
-                while index > 0 {
-                    match to_threads[index - 1].try_send(Message::Shutdown) {
-                        Ok(()) => {
-                            let _ = to_threads.remove(index);
-                            index -= 1;
+                Message::IsNotPrime((not_prime, thread_name)) => {
+                    eprintln!("{thread_name} confirmed {not_prime} is not prime.");
+                    refill_thread_name = thread_name.to_owned();
+                }
+                Message::TestThis(_) => {
+                    unreachable!("Nothing should be sending main primes to test.");
+                }
+                Message::Stop(thread_name) => {
+                    if !to_threads.is_empty() {
+                        panic!("Why haven't all the channels been dropped in main.");
+                    } else {
+                        match threads.remove(&thread_name) {
+                            None => {
+                                panic!("I lost the handle to {thread_name}.");
+                            }
+                            Some(handle) => {
+                                eprintln!("Joining {thread_name}.");
+                                handle
+                                    .join()
+                                    .expect("Something exploded while joining {thread_name}");
+                                eprintln!("Joined {thread_name}.")
+                            }
                         }
-                        Err(err) => match err {
-                            // Leave this thread alone. We will try again to close
-                            // it later.
-                            TrySendError::Full::<Message>(_) => {
-                                index -= 1;
-                            }
-                            TrySendError::Disconnected::<Message>(_) => {
-                                // This thread is already shutdown remove it.
-                                let _ = to_threads.remove(index);
-                                index -= 1;
-                            }
-                        },
+                        if threads.is_empty() {
+                            break;
+                        }
                     }
                 }
             }
-
-            let received = from_threads.recv();
-            match received {
-                Err(_) => {
-                    keep_looping = false;
-                }
-                Ok(message) => match message {
-                    Message::FoundPrime((prime, thread_name)) => {
-                        known_primes.push(prime);
-                        for thread in &to_threads {
-                            eprintln!("Found prime: {prime} from {thread_name}");
-                            // If a thread has died unexpectedly then fail.
-                            thread
-                                .send(Message::FoundPrime((prime, thread_name.to_owned())))
-                                .unwrap();
+            if !exhausted_search_space {
+                x += 2;
+                if x > u8::MAX as u128 {
+                    exhausted_search_space = true;
+                    eprintln!("I have exhausted the search space.");
+                    for (key, value) in to_threads.drain() {
+                        eprintln!("Dropping sender for {key}");
+                        let _ = value.send(Message::Stop("main".to_string()));
+                        drop(value);
+                        drop(key);
+                    }
+                } else {
+                    match to_threads[&refill_thread_name].send(Message::TestThis(x)) {
+                        Ok(_) => {
+                            sent += 1;
+                        }
+                        Err(err) => {
+                            eprintln!("{refill_thread_name} disappeared early.");
+                            return Err(std::io::Error::new(std::io::ErrorKind::Other, err));
                         }
                     }
-                    Message::TestThis(_) => {
-                        eprintln!("Nothing should be sending main primes to test.")
-                    }
-                    Message::Shutdown => {
-                        eprintln!("Main tells everything else to shutdown.")
-                    }
-                },
+                }
+            }
+        }
+        eprintln!("Joining all threads.");
+        for (name, handle) in threads.drain() {
+            match handle.join() {
+                Ok(_) => {}
+                Err(err) => {
+                    eprintln!("{name} failed prematurely output may not be complete!");
+                    eprintln!("{:?}", err);
+                }
             }
         }
         let mut writer = BufWriter::new(File::create("primes_u32.txt").unwrap());
         known_primes.sort();
+        known_primes.dedup();
         for x in known_primes {
             let _ = writeln!(writer, "{}", x);
         }
@@ -177,40 +201,55 @@ fn is_prime(x: u128, known_primes: &Vec<u128>) -> bool {
 }
 
 enum Message {
-    FoundPrime((u128, String)),
+    IsPrime((u128, String)),
+    IsNotPrime((u128, String)),
     TestThis(u128),
-    Shutdown,
+    Stop(String),
 }
 
 /// This is the other_threads
 fn other_thread(
     known_primes: &mut Vec<u128>,
     from_main: Receiver<Message>,
-    to_main: SyncSender<Message>,
+    to_main: Sender<Message>,
 ) {
     let my_name: String = thread::current().name().unwrap().to_string();
-    while let Ok(input) = from_main.recv() {
-        match input {
-            Message::Shutdown => {
-                break;
-            }
-            Message::FoundPrime((x, thread_name)) => {
-                if my_name != thread_name {
-                    known_primes.push(x);
+    loop {
+        match from_main.recv() {
+            Err(_) => {}
+            Ok(input) => match input {
+                Message::IsPrime((x, thread_name)) => {
+                    if my_name != thread_name {
+                        known_primes.push(x);
+                    }
                 }
-            }
-            Message::TestThis(x) => {
-                if is_prime(x, known_primes) {
-                    to_main
-                        .send(Message::FoundPrime((x, my_name.to_owned())))
-                        .expect("Main thread should not die first.");
-                    known_primes.push(x);
+                Message::IsNotPrime((x, thread)) => {
+                    eprintln!("Main forwarded {x} is not prime from {thread}. Please fix.");
                 }
-            }
+                Message::TestThis(x) => {
+                    if is_prime(x, known_primes) {
+                        to_main
+                            .send(Message::IsPrime((x, my_name.to_owned())))
+                            .expect("Main thread should not die first.");
+                        known_primes.push(x);
+                    } else {
+                        to_main
+                            .send(Message::IsNotPrime((x, my_name.to_owned())))
+                            .expect("Main thread should not die first.");
+                    }
+                }
+                Message::Stop(from) => {
+                    eprintln!("{my_name} is stopping on orders from {from}.");
+                    let _ = to_main.send(Message::Stop(my_name.to_owned()));
+                    drop(to_main);
+                    drop(from_main);
+                    drop(known_primes);
+                    drop(my_name);
+                    break; // I can stop now.
+                }
+            },
         }
     }
-    drop(from_main);
-    drop(to_main);
 }
 
 /*
