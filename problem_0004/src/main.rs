@@ -1,5 +1,27 @@
+use std::vec::Vec;
 fn main() {
-    println!("Hello, world!");
+    println!("Project Euler Problem 4 Solver");
+    print!("The palindromes made from multiplying three-digit");
+    println!(" numbers are:");
+
+    let mut x: u32 = 999_u32;
+    let mut y: u32 = 999_u32;
+    let mut z: u32;
+    let mut palindromes: Vec<u32> = Vec::<u32>::with_capacity(1024);
+    while x > 99 {
+        while y > 99 {
+            z = x * y;
+            y -= 1;
+            if is_palindrome(z) {
+                palindromes.push(z);
+            }
+        }
+        y = 999;
+        x -= 1;
+    }
+    palindromes.sort();
+    palindromes.dedup();
+    println!("Largest palindrome is {}", palindromes.last().unwrap());
 }
 
 fn is_palindrome(number: u32) -> bool {
