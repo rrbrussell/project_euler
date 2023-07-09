@@ -12,7 +12,6 @@ use std::sync::mpsc::Sender;
 use std::thread;
 use std::thread::Builder;
 use std::thread::JoinHandle;
-use std::time::Duration;
 
 fn main() -> Result<(), std::io::Error> {
     println!("Finding all primes that fit inside a u32.");
@@ -62,7 +61,6 @@ fn main() -> Result<(), std::io::Error> {
 
         let mut threads = HashMap::<String, JoinHandle<()>>::with_capacity(number_of_threads);
         let mut to_threads = HashMap::<String, Sender<Message>>::with_capacity(number_of_threads);
-        let mut threads_to_clean = Vec::<String>::with_capacity(number_of_threads);
         let (to_main, from_threads) = channel::<Message>();
         for ind in 0..number_of_threads {
             let (to_thread, from_main) = channel::<Message>();
@@ -82,33 +80,17 @@ fn main() -> Result<(), std::io::Error> {
         // known_primes has at least two items in it.
         let mut x: u128 = *known_primes.last().unwrap();
 
-        let mut sent = 0;
-        let mut recv = 0;
-
         //prime the worker threads
-        for (key, value) in to_threads.iter() {
+        for (_, value) in to_threads.iter() {
             x += 2;
-            if x < u32::MAX as u128 {
-                eprintln!("Sending {x} to thread {key}");
-                if value.send(Message::TestThis(x)).is_err() {
-                    threads_to_clean.push(key.to_owned());
-                } else {
-                    sent += 1;
-                }
-            }
+            // This should explode if a thread went missing.
+            value.send(Message::TestThis(x)).unwrap();
         }
-        for item in &threads_to_clean {
-            to_threads.remove(item);
-        }
-        threads_to_clean.clear();
         let mut exhausted_search_space: bool = false;
         while let Ok(received) = from_threads.recv() {
-            recv += 1;
-            eprintln!("Main has sent {sent} and received {recv}");
             let mut refill_thread_name: String = "".to_string();
             match received {
                 Message::IsPrime((prime, thread_name)) => {
-                    eprintln!("{thread_name} confirmed {prime} is prime.");
                     known_primes.push(prime);
                     refill_thread_name = thread_name.to_owned();
                     for (_, sender) in to_threads.iter() {
@@ -118,8 +100,7 @@ fn main() -> Result<(), std::io::Error> {
                             .unwrap();
                     }
                 }
-                Message::IsNotPrime((not_prime, thread_name)) => {
-                    eprintln!("{thread_name} confirmed {not_prime} is not prime.");
+                Message::IsNotPrime((_, thread_name)) => {
                     refill_thread_name = thread_name.to_owned();
                 }
                 Message::TestThis(_) => {
@@ -134,11 +115,9 @@ fn main() -> Result<(), std::io::Error> {
                                 panic!("I lost the handle to {thread_name}.");
                             }
                             Some(handle) => {
-                                eprintln!("Joining {thread_name}.");
                                 handle
                                     .join()
                                     .expect("Something exploded while joining {thread_name}");
-                                eprintln!("Joined {thread_name}.")
                             }
                         }
                         if threads.is_empty() {
@@ -149,35 +128,21 @@ fn main() -> Result<(), std::io::Error> {
             }
             if !exhausted_search_space {
                 x += 2;
-                if x > u8::MAX as u128 {
+                if x > u32::MAX as u128 {
                     exhausted_search_space = true;
-                    eprintln!("I have exhausted the search space.");
                     for (key, value) in to_threads.drain() {
-                        eprintln!("Dropping sender for {key}");
                         let _ = value.send(Message::Stop("main".to_string()));
                         drop(value);
                         drop(key);
                     }
                 } else {
                     match to_threads[&refill_thread_name].send(Message::TestThis(x)) {
-                        Ok(_) => {
-                            sent += 1;
-                        }
+                        Ok(_) => {}
                         Err(err) => {
                             eprintln!("{refill_thread_name} disappeared early.");
                             return Err(std::io::Error::new(std::io::ErrorKind::Other, err));
                         }
                     }
-                }
-            }
-        }
-        eprintln!("Joining all threads.");
-        for (name, handle) in threads.drain() {
-            match handle.join() {
-                Ok(_) => {}
-                Err(err) => {
-                    eprintln!("{name} failed prematurely output may not be complete!");
-                    eprintln!("{:?}", err);
                 }
             }
         }
@@ -224,7 +189,7 @@ fn other_thread(
                     }
                 }
                 Message::IsNotPrime((x, thread)) => {
-                    eprintln!("Main forwarded {x} is not prime from {thread}. Please fix.");
+                    unreachable!("Main forwarded {x} is not prime from {thread}. Please fix.");
                 }
                 Message::TestThis(x) => {
                     if is_prime(x, known_primes) {
@@ -238,8 +203,7 @@ fn other_thread(
                             .expect("Main thread should not die first.");
                     }
                 }
-                Message::Stop(from) => {
-                    eprintln!("{my_name} is stopping on orders from {from}.");
+                Message::Stop(_) => {
                     let _ = to_main.send(Message::Stop(my_name.to_owned()));
                     drop(to_main);
                     drop(from_main);
