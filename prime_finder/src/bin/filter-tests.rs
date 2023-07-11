@@ -1,59 +1,31 @@
-use std::collections::BTreeSet;
+use std::ops::Rem;
+use std::time::Instant;
+
+const FIVE_DIVIDER: u128 = u128::MAX / 5 + 1;
 
 /// A program for testing different ways of filtering primes.
 fn main() {
-    let mut fives_multiple: u16 = 5_u16;
-    let mut last_multiple: u16 = 5_u16;
-    let mut bytes: BTreeSet<u8> = BTreeSet::<u8>::new();
-    while fives_multiple >= last_multiple {
-        if (fives_multiple & 5_u16) == 5 {
-            last_multiple = fives_multiple;
-            fives_multiple += 5;
-        } else {
-            if (fives_multiple & 10_u16) == 10 {
-                last_multiple = fives_multiple;
-                fives_multiple += 5;
-            } else {
-                bytes.insert(fives_multiple as u8);
-                let byte = fives_multiple as u8;
-                println!("{fives_multiple:0>8}:\t{byte:0>8b}\t{byte:0>2x}\t{byte:0>4}");
-                last_multiple = fives_multiple;
-                fives_multiple += 5;
-            }
-        }
+    let start: Instant = Instant::now();
+    let test_end: u128 = 2 << 28;
+    for n in 0..=test_end as u128 {
+        let _ = is_divisible(n);
     }
+    let end: Instant = Instant::now();
+    println!(
+        "It took {} to use the new code.",
+        end.duration_since(start).as_micros()
+    );
+    let start: Instant = Instant::now();
+    for n in 0..=test_end as u128 {
+        let _ = n.rem(5);
+    }
+    let end: Instant = Instant::now();
+    println!(
+        "It took {} to use the modulus operator.",
+        end.duration_since(start).as_micros()
+    );
+}
 
-    // for byte in bytes {
-    //     println!("{byte:0>8b}\t{byte:0>2x}\t{byte:0>4}");
-    // }
-    // println!(
-    //     "{0:0>8}:\t{1:0>8b}\t{1:0>2x}\t{1:0>4}\t{2}",
-    //     5,
-    //     5 & 5,
-    //     5 & 5 == 5
-    // );
-    // println!(
-    //     "{0:0>8}:\t{1:0>8b}\t{1:0>2x}\t{1:0>4}\t{2}",
-    //     10,
-    //     10 & 5,
-    //     10 & 5 == 5
-    // );
-    // println!(
-    //     "{0:0>8}:\t{1:0>8b}\t{1:0>2x}\t{1:0>4}\t{2}",
-    //     10,
-    //     10 & 10,
-    //     10 & 10 == 10
-    // );
-    // println!(
-    //     "{0:0>8}:\t{1:0>8b}\t{1:0>2x}\t{1:0>4}\t{2}",
-    //     15,
-    //     15 & 5,
-    //     15 & 5 == 5
-    // );
-    // println!(
-    //     "{0:0>8}:\t{1:0>8b}\t{1:0>2x}\t{1:0>4}\t{2}",
-    //     15,
-    //     15 & 10,
-    //     15 & 10 == 10
-    // );
+fn is_divisible(n: u128) -> bool {
+    return n.wrapping_mul(FIVE_DIVIDER) <= FIVE_DIVIDER - 1;
 }
