@@ -1,3 +1,4 @@
+use clap::Parser;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufRead;
@@ -13,8 +14,23 @@ use std::thread;
 use std::thread::Builder;
 use std::thread::JoinHandle;
 
+/// Simple program to make a lookup table of primes and fast divisors.
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Input file of primes.
+    #[arg(long = "list")]
+    list_file: String,
+    /// Output file for the primes.
+    #[arg(long = "output")]
+    output_file: String,
+    /// Test candidates up to bits in length.
+    #[arg(long = "length")]
+    candidate_length: u8,
+}
+
 fn main() -> Result<(), std::io::Error> {
-    println!("Finding all primes that fit inside a u32.");
+    let args: Args = Args::parse();
 
     // Use threads or not.
     let number_of_threads = thread::available_parallelism()
