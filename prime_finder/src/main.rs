@@ -1,9 +1,18 @@
+use bincode::Options;
 use clap::Parser;
+use prime_finder::open_file;
+use prime_finder::PrimeAndDivisor;
+use prime_finder::SERIALIZER;
 use std::collections::HashMap;
 use std::fs::File;
+use std::fs::Metadata;
+use std::hash::Hash;
 use std::io::BufRead;
 use std::io::BufReader;
 use std::io::BufWriter;
+use std::io::ErrorKind;
+use std::io::Read;
+use std::io::Seek;
 use std::io::Write;
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -26,7 +35,7 @@ struct Args {
     output_file: String,
     /// Test candidates up to bits in length.
     #[arg(long = "length")]
-    candidate_length: u8,
+    candidate_length: u32,
 }
 
 fn main() -> Result<(), std::io::Error> {
@@ -40,39 +49,74 @@ fn main() -> Result<(), std::io::Error> {
         println!("You shouldn't run this program on a single thread processor.");
         return Ok(());
     } else {
-        let mut known_primes: Vec<u128> = Vec::with_capacity(8192);
-        let previous_primes_list = [
-            "primes_u64.txt",
-            "primes_u32.txt",
-            "primes_u16.txt",
-            "primes_u8.txt",
-        ];
-        for list_entry in previous_primes_list {
-            let possible_previous_primes = Path::new(list_entry).try_exists()?;
-            if possible_previous_primes {
-                let mut reader = BufReader::new(File::open(list_entry).unwrap());
-                let mut buffer: String = String::with_capacity(64);
-                while let Ok(result) = reader.read_line(&mut buffer) {
-                    if result > 0 {
-                        match u128::from_str_radix(&buffer.trim(), 10) {
-                            Ok(y) => {
-                                known_primes.push(y);
-                                buffer.clear();
-                            }
-                            Err(err) => {
-                                return Err(std::io::Error::new(std::io::ErrorKind::Other, err));
-                            }
-                        }
-                    } else {
-                        break;
-                    }
+        let mut known_primes: HashMap<u128, u128> = HashMap::with_capacity(8192);
+        let list_reader: BufReader<File>;
+        let file_size: u64;
+
+        match open_file(&args.list_file) {
+            Ok(file) => {
+                let metadata: Metadata = file.metadata().expect(
+                    format!("Somebody is screwing around with {}", &args.list_file).as_str(),
+                );
+                file_size = metadata.len();
+                if file_size == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        format!("{} must not be empty.", &args.list_file),
+                    ));
                 }
-                break;
+            }
+            Err(err) => {
+                eprintln!("Unable to open {}.", &args.list_file);
+                return Err(err);
             }
         }
-        if known_primes.len() < 3 {
-            known_primes.push(2);
-            known_primes.push(3);
+
+        let mut buffer: [u8; 32] = [
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0,
+        ];
+        let mut keep_reading: bool = true;
+        while keep_reading {
+            match list_reader.read_exact(&mut buffer[..]) {
+                Err(err) => {
+                    match err.kind() {
+                        std::io::ErrorKind::UnexpectedEof => {
+                            // We are done reading the file.
+                            keep_reading = false;
+                            break;
+                        }
+                        _ => {
+                            eprintln!(
+                                "Unexpected {err} occurred while reading from {}.",
+                                args.list_file
+                            );
+                            keep_reading = false;
+                            break;
+                        }
+                    }
+                }
+                Ok(_) => match list_reader.stream_position() {
+                    Err(err) => {
+                        eprintln!("I received {err} message while reading input primes table.");
+                        keep_reading = false;
+                    }
+                    Ok(position) => {
+                        match SERIALIZER.deserialize::<PrimeAndDivisor>(&buffer) {
+                            Ok(prime) => {
+                                known_primes.insert(prime.prime, prime.divisor);
+                                buffer.fill(0);
+                            }
+                            Err(err) => {
+                                eprintln!("Unable to parse a prime because of {}", err);
+                            }
+                        }
+                        if position >= file_size {
+                            keep_reading = false;
+                        }
+                    }
+                },
+            }
         }
 
         let mut threads = HashMap::<String, JoinHandle<()>>::with_capacity(number_of_threads);

@@ -57,5 +57,6 @@ fn main() -> std::io::Result<()> {
             break;
         }
     }
+    writer.flush()?;
     return Ok(());
 }
